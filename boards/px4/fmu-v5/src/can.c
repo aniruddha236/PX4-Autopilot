@@ -37,8 +37,6 @@
  * Board-specific CAN functions.
  */
 
-#if !defined(CONFIG_CAN)
-
 #include <stdint.h>
 
 #include "board_config.h"
@@ -60,7 +58,7 @@ uint16_t board_get_can_interfaces(void)
 	return enabled_interfaces;
 }
 
-#else
+#if defined(CONFIG_CAN)
 
 #include <errno.h>
 #include <debug.h>
@@ -82,12 +80,12 @@ uint16_t board_get_can_interfaces(void)
  ************************************************************************************/
 /* Configuration ********************************************************************/
 
-#if defined(CONFIG_STM32_CAN1) && defined(CONFIG_STM32_CAN2)
-#  warning "Both CAN1 and CAN2 are enabled.  Assuming only CAN1."
-#  undef CONFIG_STM32_CAN2
+#if defined(CONFIG_STM32F7_CAN1) && defined(CONFIG_STM32F7_CAN2)
+#  warning "Both CAN1 and CAN2 are enabled. Assuming only CAN1."
+#  undef CONFIG_STM32F7_CAN2
 #endif
 
-#ifdef CONFIG_STM32_CAN1
+#ifdef CONFIG_STM32F7_CAN1
 #  define CAN_PORT 1
 #else
 #  define CAN_PORT 2

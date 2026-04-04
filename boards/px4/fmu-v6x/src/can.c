@@ -49,6 +49,11 @@ uint16_t board_get_can_interfaces(void)
 {
 	uint16_t enabled_interfaces = 0x3;
 
+#ifdef CONFIG_NET_CAN
+	/* Reserve CAN2 for the native raw-CAN path when SocketCAN support is built. */
+	enabled_interfaces = 0x1;
+#endif
+
 	if (!PX4_MFT_HW_SUPPORTED(PX4_MFT_CAN2)) {
 		enabled_interfaces &= ~(1 << 1);
 	}

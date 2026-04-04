@@ -128,6 +128,8 @@ CanIface *ifaces[UAVCAN_STM32H7_NUM_IFACES] = {
 #endif
 };
 
+bool can_driver_initialized_once = false;
+
 inline void handleTxInterrupt(uavcan::uint8_t iface_index)
 {
 	UAVCAN_ASSERT(iface_index < UAVCAN_STM32H7_NUM_IFACES);
@@ -410,6 +412,10 @@ uavcan::int16_t CanIface::send(const uavcan::CanFrame &frame, uavcan::MonotonicT
 		return -ErrUnsupportedFrame;
 	}
 
+	if (!initialized_) {
+		return -ErrLogic;
+	}
+
 	/*
 	 * Normally we should perform the same check as in @ref canAcceptNewTxFrame(), because
 	 * it is possible that the highest-priority frame between select() and send() could have been
@@ -426,6 +432,10 @@ uavcan::int16_t CanIface::send(const uavcan::CanFrame &frame, uavcan::MonotonicT
 	 *  - It takes CPU time. Not just CPU time, but critical section time, which is expensive.
 	 */
 	CriticalSectionLocker lock;
+
+	if ((can_->TXBC & FDCAN_TXBC_TFQS) == 0 || message_ram_.TxFIFOSA == 0) {
+		return -ErrLogic;
+	}
 
 	// First, check if there are any slots available in the FIFO
 	if ((can_->TXFQS & FDCAN_TXFQS_TFQF) > 0) {
@@ -493,6 +503,10 @@ uavcan::int16_t CanIface::send(const uavcan::CanFrame &frame, uavcan::MonotonicT
 uavcan::int16_t CanIface::receive(uavcan::CanFrame &out_frame, uavcan::MonotonicTime &out_ts_monotonic,
 				  uavcan::UtcTime &out_ts_utc, uavcan::CanIOFlags &out_flags)
 {
+	if (!initialized_) {
+		return -ErrLogic;
+	}
+
 	out_ts_monotonic = clock::getMonotonic();  // High precision is not required for monotonic timestamps
 	uavcan::uint64_t utc_usec = 0;
 	{
@@ -667,6 +681,8 @@ bool CanIface::waitCCCRBitStateChange(uint32_t mask, bool target_state)
 
 int CanIface::init(const uavcan::uint32_t bitrate, const OperatingMode mode)
 {
+	initialized_ = false;
+
 	/*
 	 * Wake up the device and enable configuration changes
 	 */
@@ -850,6 +866,7 @@ int CanIface::init(const uavcan::uint32_t bitrate, const OperatingMode mode)
 	 * Exit Initialization mode
 	 */
 	can_->CCCR &= ~FDCAN_CCCR_INIT;
+	initialized_ = true;
 
 	return 0;
 }
@@ -1174,10 +1191,8 @@ int CanDriver::init(const uavcan::uint32_t bitrate, const CanIface::OperatingMod
 
 	UAVCAN_STM32H7_LOG("Bitrate %lu mode %d", static_cast<unsigned long>(bitrate), static_cast<int>(mode));
 
-	static bool initialized_once = false;
-
-	if (!initialized_once) {
-		initialized_once = true;
+	if (!can_driver_initialized_once) {
+		can_driver_initialized_once = true;
 		UAVCAN_STM32H7_LOG("First initialization");
 		initOnce();
 	}
@@ -1226,6 +1241,65 @@ fail:
 	UAVCAN_STM32H7_LOG("CAN drv init failed %i", res);
 	UAVCAN_ASSERT(res < 0);
 	return res;
+}
+
+int CanDriver::initRawIface(const uavcan::uint8_t iface_index, const uavcan::uint32_t bitrate,
+			    const CanIface::OperatingMode mode)
+{
+	if (!can_driver_initialized_once) {
+		can_driver_initialized_once = true;
+		initOnce();
+	}
+
+	switch (iface_index) {
+	case 0:
+		ifaces[0] = &if0_;
+		return if0_.init(bitrate, mode);
+
+#if UAVCAN_STM32H7_NUM_IFACES > 1
+	case 1:
+		ifaces[1] = &if1_;
+		return if1_.init(bitrate, mode);
+#endif
+
+	default:
+		return -ErrLogic;
+	}
+}
+
+uavcan::int16_t CanDriver::rawSend(const uavcan::uint8_t iface_index, const uavcan::CanFrame &frame,
+				   uavcan::MonotonicTime tx_deadline, uavcan::CanIOFlags flags)
+{
+	switch (iface_index) {
+	case 0:
+		return if0_.sendRaw(frame, tx_deadline, flags);
+
+#if UAVCAN_STM32H7_NUM_IFACES > 1
+	case 1:
+		return if1_.sendRaw(frame, tx_deadline, flags);
+#endif
+
+	default:
+		return -ErrLogic;
+	}
+}
+
+uavcan::int16_t CanDriver::rawReceive(const uavcan::uint8_t iface_index, uavcan::CanFrame &out_frame,
+				      uavcan::MonotonicTime &out_ts_monotonic, uavcan::UtcTime &out_ts_utc,
+				      uavcan::CanIOFlags &out_flags)
+{
+	switch (iface_index) {
+	case 0:
+		return if0_.receiveRaw(out_frame, out_ts_monotonic, out_ts_utc, out_flags);
+
+#if UAVCAN_STM32H7_NUM_IFACES > 1
+	case 1:
+		return if1_.receiveRaw(out_frame, out_ts_monotonic, out_ts_utc, out_flags);
+#endif
+
+	default:
+		return -ErrLogic;
+	}
 }
 
 CanIface *CanDriver::getIface(uavcan::uint8_t iface_index)

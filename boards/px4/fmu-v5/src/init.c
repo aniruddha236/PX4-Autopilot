@@ -75,6 +75,10 @@
 #include <px4_platform/board_determine_hw_info.h>
 #include <px4_platform/board_dma_alloc.h>
 
+#ifdef CONFIG_CAN
+int can_devinit(void);
+#endif
+
 /****************************************************************************
  * Pre-Processor Definitions
  ****************************************************************************/
@@ -252,6 +256,14 @@ __EXPORT int board_app_initialize(uintptr_t arg)
 	if (!PX4_MFT_HW_SUPPORTED(PX4_MFT_CAN3)) {
 		px4_arch_configgpio(_GPIO_PULL_DOWN_INPUT(GPIO_CAN3_RX));
 	}
+
+#ifdef CONFIG_CAN
+	int can_ret = can_devinit();
+
+	if (can_ret != OK) {
+		syslog(LOG_ERR, "[boot] CAN init failed (%d)\n", can_ret);
+	}
+#endif
 
 	/* configure the DMA allocator */
 

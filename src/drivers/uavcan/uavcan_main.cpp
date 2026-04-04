@@ -45,6 +45,7 @@
 #include <px4_platform_common/px4_config.h>
 #include <px4_platform_common/tasks.h>
 
+#include <cctype>
 #include <inttypes.h>
 #include <cstdlib>
 #include <cstring>
@@ -75,6 +76,176 @@
 UavcanNode *UavcanNode::_instance;
 
 static UavcanNode::CanInitHelper *can = nullptr;
+
+#if defined(UAVCAN_STM32H7_NUTTX) && (UAVCAN_STM32H7_NUM_IFACES > 1)
+namespace
+{
+constexpr uint8_t RawCanIfaceIndex = 1;
+
+bool parse_hex_nibble(char c, uint8_t &value)
+{
+	if (c >= '0' && c <= '9') {
+		value = static_cast<uint8_t>(c - '0');
+		return true;
+	}
+
+	c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+	if (c >= 'A' && c <= 'F') {
+		value = static_cast<uint8_t>(10 + (c - 'A'));
+		return true;
+	}
+
+	return false;
+}
+
+bool parse_raw_can_frame(const char *arg, uavcan::CanFrame &frame)
+{
+	const char *sep = std::strchr(arg, '#');
+
+	if (sep == nullptr || sep == arg || *(sep + 1) == '\0') {
+		return false;
+	}
+
+	const size_t id_len = static_cast<size_t>(sep - arg);
+
+	if (id_len > 8) {
+		return false;
+	}
+
+	char id_buf[9] {};
+	std::memcpy(id_buf, arg, id_len);
+
+	char *endptr = nullptr;
+	const unsigned long can_id = std::strtoul(id_buf, &endptr, 16);
+
+	if (endptr == id_buf || *endptr != '\0') {
+		return false;
+	}
+
+	const char *data = sep + 1;
+	const size_t data_len = std::strlen(data);
+
+	if ((data_len % 2) != 0 || (data_len / 2) > uavcan::CanFrame::MaxDataLen) {
+		return false;
+	}
+
+	frame = {};
+	frame.id = static_cast<uint32_t>(can_id);
+	frame.dlc = data_len / 2;
+
+	if (id_len > 3) {
+		frame.id |= uavcan::CanFrame::FlagEFF;
+	}
+
+	for (size_t i = 0; i < data_len / 2; ++i) {
+		uint8_t hi = 0;
+		uint8_t lo = 0;
+
+		if (!parse_hex_nibble(data[i * 2], hi) || !parse_hex_nibble(data[i * 2 + 1], lo)) {
+			return false;
+		}
+
+		frame.data[i] = static_cast<uint8_t>((hi << 4) | lo);
+	}
+
+	return true;
+}
+
+void print_raw_can_frame(const uavcan::CanFrame &frame)
+{
+	PX4_INFO_RAW("CAN2 RX %s id=0x%08" PRIx32 " dlc=%u data=",
+		     frame.isExtended() ? "EXT" : "STD",
+		     frame.id & (frame.isExtended() ? uavcan::CanFrame::MaskExtID : uavcan::CanFrame::MaskStdID),
+		     static_cast<unsigned>(frame.dlc));
+
+	for (unsigned i = 0; i < frame.dlc; ++i) {
+		PX4_INFO_RAW("%s%02x", (i == 0) ? "" : " ", frame.data[i]);
+	}
+
+	PX4_INFO_RAW("\n");
+}
+
+int raw_can2_start(int32_t bitrate)
+{
+	if (can == nullptr) {
+		PX4_ERR("UAVCAN helper not initialized");
+		return -1;
+	}
+
+	const int res = can->driver.initRawIface(RawCanIfaceIndex, static_cast<uint32_t>(bitrate));
+
+	if (res < 0) {
+		PX4_ERR("CAN2 raw init failed (%d)", res);
+		return res;
+	}
+
+	PX4_INFO("CAN2 raw init OK at %ld bit/s", static_cast<long>(bitrate));
+	return 0;
+}
+
+int raw_can2_send(const char *arg)
+{
+	if (can == nullptr) {
+		PX4_ERR("UAVCAN helper not initialized");
+		return -1;
+	}
+
+	uavcan::CanFrame frame;
+
+	if (!parse_raw_can_frame(arg, frame)) {
+		PX4_ERR("invalid frame, expected <id>#<data>");
+		return -1;
+	}
+
+	const int res = can->driver.rawSend(RawCanIfaceIndex, frame,
+					    UAVCAN_DRIVER::SystemClock::instance().getMonotonic() +
+					    uavcan::MonotonicDuration::fromMSec(100));
+
+	if (res < 0) {
+		PX4_ERR("raw send failed (%d)", res);
+		return res;
+	}
+
+	PX4_INFO("sent on CAN2");
+	print_raw_can_frame(frame);
+	return 0;
+}
+
+int raw_can2_dump(int count)
+{
+	if (can == nullptr) {
+		PX4_ERR("UAVCAN helper not initialized");
+		return -1;
+	}
+
+	int received = 0;
+	PX4_INFO("dumping CAN2 raw frames%s", (count > 0) ? "" : " until interrupted");
+
+	while (count <= 0 || received < count) {
+		uavcan::CanFrame frame;
+		uavcan::MonotonicTime mono;
+		uavcan::UtcTime utc;
+		uavcan::CanIOFlags flags = 0;
+		const int res = can->driver.rawReceive(RawCanIfaceIndex, frame, mono, utc, flags);
+
+		if (res > 0) {
+			print_raw_can_frame(frame);
+			received++;
+
+		} else if (res == 0) {
+			usleep(10000);
+
+		} else {
+			PX4_ERR("raw receive failed (%d)", res);
+			return res;
+		}
+	}
+
+	return 0;
+}
+} // namespace
+#endif
 
 UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &system_clock) :
 	ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::uavcan),
@@ -1463,7 +1634,13 @@ static void print_usage()
 {
 	PX4_INFO("usage: \n"
 		 "\tuavcan {start|status|stop|shrink|update}\n"
-		 "\t        param [set|get|list|save] <node-id> <name> <value>|reset <node-id>");
+		 "\t        param [set|get|list|save] <node-id> <name> <value>|reset <node-id>"
+#if defined(UAVCAN_STM32H7_NUTTX) && (UAVCAN_STM32H7_NUM_IFACES > 1)
+		 "\n\t        raw_start [bitrate]\n"
+		 "\t        raw_send <id#data>\n"
+		 "\t        raw_dump [count]"
+#endif
+		);
 }
 
 extern "C" __EXPORT int uavcan_main(int argc, char *argv[])
@@ -1523,6 +1700,38 @@ extern "C" __EXPORT int uavcan_main(int argc, char *argv[])
 		inst->shrink();
 		::exit(0);
 	}
+
+#if defined(UAVCAN_STM32H7_NUTTX) && (UAVCAN_STM32H7_NUM_IFACES > 1)
+	if (!std::strcmp(argv[1], "raw_start")) {
+		int32_t bitrate = 1000000;
+
+		if (argc >= 3) {
+			bitrate = std::strtol(argv[2], nullptr, 10);
+		} else {
+			(void)param_get(param_find("UAVCAN_BITRATE"), &bitrate);
+		}
+
+		return raw_can2_start(bitrate);
+	}
+
+	if (!std::strcmp(argv[1], "raw_send")) {
+		if (argc < 3) {
+			errx(1, "frame required");
+		}
+
+		return raw_can2_send(argv[2]);
+	}
+
+	if (!std::strcmp(argv[1], "raw_dump")) {
+		int count = 1;
+
+		if (argc >= 3) {
+			count = std::strtol(argv[2], nullptr, 10);
+		}
+
+		return raw_can2_dump(count);
+	}
+#endif
 
 	/*
 	 * Parameter setting commands

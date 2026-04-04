@@ -1,0 +1,6 @@
+menuconfig SYSTEMCMDS_CAN_DUMP
+	bool "can_dump"
+	default n
+	---help---
+		Enable support for dumping legacy NuttX CAN character devices such as
+		/dev/can0 on STM32F7 boards.

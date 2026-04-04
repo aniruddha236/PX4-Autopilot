@@ -127,6 +127,7 @@ class CanIface : public uavcan::ICanIface, uavcan::Noncopyable
 	uavcan::uint8_t peak_tx_mailbox_index_;
 	const uavcan::uint8_t self_index_;
 	bool had_activity_;
+	bool initialized_;
 
 	int computeTimings(uavcan::uint32_t target_bitrate, Timings &out_timings);
 
@@ -161,6 +162,7 @@ public:
 		, peak_tx_mailbox_index_(0)
 		, self_index_(self_index)
 		, had_activity_(false)
+		, initialized_(false)
 	{
 		UAVCAN_ASSERT(self_index_ < UAVCAN_STM32H7_NUM_IFACES);
 	}
@@ -173,6 +175,13 @@ public:
 	 *   - Caller will configure NVIC by itself
 	 */
 	int init(const uavcan::uint32_t bitrate, const OperatingMode mode);
+	uavcan::int16_t sendRaw(const uavcan::CanFrame &frame, uavcan::MonotonicTime tx_deadline,
+				uavcan::CanIOFlags flags) { return send(frame, tx_deadline, flags); }
+	uavcan::int16_t receiveRaw(uavcan::CanFrame &out_frame, uavcan::MonotonicTime &out_ts_monotonic,
+				   uavcan::UtcTime &out_ts_utc, uavcan::CanIOFlags &out_flags)
+	{
+		return receive(out_frame, out_ts_monotonic, out_ts_utc, out_flags);
+	}
 
 	void handleTxInterrupt(uavcan::uint64_t utc_usec);
 	void handleRxInterrupt(uavcan::uint8_t fifo_index);
@@ -223,6 +232,7 @@ public:
 	 * This is designed for use with iface activity LEDs.
 	 */
 	bool hadActivity();
+	bool isInitialized() const { return initialized_; }
 
 	/**
 	 * Peak number of TX mailboxes used concurrently since initialization.
@@ -283,6 +293,13 @@ public:
 	 * Returns negative value if failed (e.g. invalid bitrate).
 	 */
 	int init(const uavcan::uint32_t bitrate, const CanIface::OperatingMode mode, const uavcan::uint32_t EnabledInterfaces);
+	int initRawIface(uavcan::uint8_t iface_index, const uavcan::uint32_t bitrate,
+			 const CanIface::OperatingMode mode = CanIface::NormalMode);
+	uavcan::int16_t rawSend(uavcan::uint8_t iface_index, const uavcan::CanFrame &frame,
+				uavcan::MonotonicTime tx_deadline, uavcan::CanIOFlags flags = 0);
+	uavcan::int16_t rawReceive(uavcan::uint8_t iface_index, uavcan::CanFrame &out_frame,
+				   uavcan::MonotonicTime &out_ts_monotonic, uavcan::UtcTime &out_ts_utc,
+				   uavcan::CanIOFlags &out_flags);
 
 	virtual CanIface *getIface(uavcan::uint8_t iface_index);
 
