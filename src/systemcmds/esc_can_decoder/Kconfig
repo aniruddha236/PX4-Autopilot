@@ -1,0 +1,6 @@
+menuconfig SYSTEMCMDS_ESC_CAN_DECODER
+	bool "esc_can_decoder"
+	default n
+	---help---
+		Enable a bench utility on STM32H7 boards that receives raw ESC telemetry
+		from CAN2 and republishes it as esc_status and battery_status uORB topics.

@@ -1,0 +1,6 @@
+menuconfig SYSTEMCMDS_ESC_CAN_BENCH
+	bool "esc_can_bench"
+	default n
+	---help---
+		Enable a small bench utility that periodically publishes dummy ESC telemetry
+		as extended CAN frames via a legacy NuttX CAN character device such as /dev/can0.
