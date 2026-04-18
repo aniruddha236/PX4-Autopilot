@@ -35,6 +35,7 @@
 #include <px4_platform_common/getopt.h>
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/px4_config.h>
+#include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 #include <px4_platform_common/posix.h>
 
 #include <nuttx/can/can.h>
@@ -48,20 +49,26 @@
 #include <cstdio>
 #include <cstring>
 
-class EscCanBench : public ModuleBase
+class EscCanBench : public ModuleBase, public px4::ScheduledWorkItem
 {
 public:
 	static Descriptor desc;
 
-	EscCanBench(const char *device, uint32_t offset, uint32_t rate_hz, uint16_t voltage_dv, int16_t current_da,
+	EscCanBench(const char *device, uint32_t offset, uint16_t voltage_dv, int16_t current_da,
 		    int32_t rpm)
-		: _offset(offset), _rate_hz(rate_hz), _voltage_dv(voltage_dv), _current_da(current_da), _rpm(rpm)
+		: ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::lp_default), _offset(offset), _voltage_dv(voltage_dv), _current_da(current_da), _rpm(rpm)
 	{
 		strncpy(_device_path, device, sizeof(_device_path) - 1);
 		_device_path[sizeof(_device_path) - 1] = '\0';
 	}
 
-	~EscCanBench() override = default;
+	~EscCanBench() override
+	{
+		if (fd >= 0) {
+			::close(fd);
+			fd = -1;
+		}
+	}
 
 	static int task_spawn(int argc, char *argv[]);
 	static int run_trampoline(int argc, char *argv[]);
@@ -69,8 +76,9 @@ public:
 	static int custom_command(int argc, char *argv[]) { return print_usage("unknown command"); }
 	static int print_usage(const char *reason = nullptr);
 
-	void run() override;
 	int print_status() override;
+
+	bool init();
 
 private:
 	static constexpr uint32_t TelemetryBase = 0x14A30000U;
@@ -78,16 +86,32 @@ private:
 
 	char _device_path[32] {"/dev/can0"};
 	uint32_t _offset{0};
-	uint32_t _rate_hz{20};
 	uint16_t _voltage_dv{240};
 	int16_t _current_da{15};
 	int32_t _rpm{1500};
 
+	int fd{-1};
+
 	uint32_t telemetry_can_id() const { return TelemetryBase + _offset + TelemetryPacket1; }
 	void fill_packet(can_msg_s &msg) const;
+
+	void Run() override;
 };
 
 ModuleBase::Descriptor EscCanBench::desc{task_spawn, custom_command, print_usage};
+
+bool EscCanBench::init()
+{
+	fd = ::open(_device_path, O_WRONLY | O_NONBLOCK);
+
+	if (fd < 0) {
+		PX4_ERR("open %s failed (%d)", _device_path, errno);
+		return false;
+	}
+
+	ScheduleOnInterval(10000);
+	return true;
+}
 
 void EscCanBench::fill_packet(can_msg_s &msg) const
 {
@@ -138,7 +162,6 @@ The message format is:
 	PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 	PRINT_MODULE_USAGE_PARAM_STRING('d', "/dev/can0", "<device>", "CAN char device path", true);
 	PRINT_MODULE_USAGE_PARAM_INT('o', 0, 0, 0x1fffffff, "D09 offset added to base CAN ID", true);
-	PRINT_MODULE_USAGE_PARAM_INT('r', 20, 1, 1000, "Publish rate in Hz", true);
 	PRINT_MODULE_USAGE_PARAM_INT('v', 240, 0, 65535, "Voltage in 0.1 V units", true);
 	PRINT_MODULE_USAGE_PARAM_INT('c', 15, -32768, 32767, "Current in 0.1 A units", true);
 	PRINT_MODULE_USAGE_PARAM_INT('p', 1500, INT32_MIN, INT32_MAX, "RPM", true);
@@ -147,16 +170,23 @@ The message format is:
 
 int EscCanBench::task_spawn(int argc, char *argv[])
 {
-	int task_id = px4_task_spawn_cmd("esc_can_bench", SCHED_DEFAULT,
-					 SCHED_PRIORITY_SLOW_DRIVER, PX4_STACK_ADJUSTED(2048),
-					 run_trampoline, (char *const *)argv);
+	EscCanBench *instance = instantiate(argc, argv);
 
-	if (task_id < 0) {
-		return -errno;
+	if (instance == nullptr) {
+		return PX4_ERROR;
 	}
 
-	desc.task_id = task_id;
-	return 0;
+	desc.object.store(instance);
+	desc.task_id = task_id_is_work_queue;
+
+	if (!instance->init()) {
+		delete instance;
+		desc.object.store(nullptr);
+		desc.task_id = -1;
+		return PX4_ERROR;
+	}
+
+	return PX4_OK;
 }
 
 int EscCanBench::run_trampoline(int argc, char *argv[])
@@ -170,7 +200,6 @@ EscCanBench *EscCanBench::instantiate(int argc, char *argv[])
 {
 	const char *device = "/dev/can0";
 	int offset = 0;
-	int rate_hz = 20;
 	int voltage_dv = 240;
 	int current_da = 15;
 	int rpm = 1500;
@@ -179,7 +208,7 @@ EscCanBench *EscCanBench::instantiate(int argc, char *argv[])
 	int ch;
 	const char *myoptarg = nullptr;
 
-	while ((ch = px4_getopt(argc, argv, "d:o:r:v:c:p:", &myoptind, &myoptarg)) != EOF) {
+	while ((ch = px4_getopt(argc, argv, "d:o:v:c:p:", &myoptind, &myoptarg)) != EOF) {
 		switch (ch) {
 		case 'd':
 			device = myoptarg;
@@ -188,14 +217,6 @@ EscCanBench *EscCanBench::instantiate(int argc, char *argv[])
 		case 'o':
 			if (px4_get_parameter_value(myoptarg, offset) != 0) {
 				PX4_ERR("offset parsing failed");
-				return nullptr;
-			}
-
-			break;
-
-		case 'r':
-			if (px4_get_parameter_value(myoptarg, rate_hz) != 0) {
-				PX4_ERR("rate parsing failed");
 				return nullptr;
 			}
 
@@ -235,46 +256,45 @@ EscCanBench *EscCanBench::instantiate(int argc, char *argv[])
 		return nullptr;
 	}
 
-	if (rate_hz <= 0) {
-		PX4_ERR("rate must be positive");
-		return nullptr;
-	}
-
-	return new EscCanBench(device, static_cast<uint32_t>(offset), static_cast<uint32_t>(rate_hz),
+	return new EscCanBench(device, static_cast<uint32_t>(offset),
 			       static_cast<uint16_t>(voltage_dv), static_cast<int16_t>(current_da), rpm);
 }
 
-void EscCanBench::run()
+void EscCanBench::Run()
 {
-	px4_prctl(PR_SET_NAME, "esc_can_bench", px4_getpid());
+	if (should_exit()) {
+		ScheduleClear();
 
-	const useconds_t interval_us = 1000000U / _rate_hz;
+		if (fd >= 0) {
+			::close(fd);
+			fd = -1;
+		}
 
-	while (!should_exit()) {
-		const int fd = ::open(_device_path, O_WRONLY | O_NONBLOCK);
+		exit_and_cleanup(desc);
+		return;
+	}
+
+	if (fd < 0) {
+		fd = ::open(_device_path, O_WRONLY | O_NONBLOCK);
 
 		if (fd < 0) {
 			PX4_ERR("open %s failed (%d)", _device_path, errno);
-			px4_usleep(1000000);
-			continue;
+			return;
+		}
+	}
+
+	can_msg_s msg {};
+	fill_packet(msg);
+	const size_t expected = CAN_MSGLEN(msg.cm_hdr.ch_dlc);
+	const ssize_t nbytes = ::write(fd, &msg, expected);
+
+	if (nbytes < 0) {
+		if (errno != EAGAIN) {
+			PX4_ERR("write failed (%d)", errno);
 		}
 
-		can_msg_s msg {};
-		fill_packet(msg);
-		const size_t expected = CAN_MSGLEN(msg.cm_hdr.ch_dlc);
-		const ssize_t nbytes = ::write(fd, &msg, expected);
-
-		if (nbytes < 0) {
-			if (errno != EAGAIN) {
-				PX4_ERR("write failed (%d)", errno);
-			}
-
-		} else if (nbytes != static_cast<ssize_t>(expected)) {
-			PX4_ERR("short write (%ld, expected %zu)", static_cast<long>(nbytes), expected);
-		}
-
-		::close(fd);
-		px4_usleep(interval_us);
+	} else if (nbytes != static_cast<ssize_t>(expected)) {
+		PX4_ERR("short write (%ld, expected %zu)", static_cast<long>(nbytes), expected);
 	}
 }
 
@@ -282,7 +302,6 @@ int EscCanBench::print_status()
 {
 	PX4_INFO("device: %s", _device_path);
 	PX4_INFO("can id: 0x%08" PRIx32, telemetry_can_id());
-	PX4_INFO("rate: %" PRIu32 " Hz", _rate_hz);
 	PX4_INFO("voltage: %" PRIu16 " dV", _voltage_dv);
 	PX4_INFO("current: %" PRId16 " dA", _current_da);
 	PX4_INFO("rpm: %" PRId32, _rpm);

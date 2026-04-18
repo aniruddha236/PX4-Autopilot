@@ -1,0 +1,5 @@
+menuconfig SYSTEMCMDS_AACI_CONTACTOR
+	bool "aaci_contactor"
+	default n
+	---help---
+		Enable one-shot AACI contactor command over CAN2.
