@@ -184,6 +184,10 @@ ControlAllocator::update_allocation_method(bool force)
 				_control_allocation[i] = new ControlAllocationSequentialDesaturation();
 				break;
 
+			case AllocationMethod::ERP:
+				_control_allocation[i] = new ControlAllocationERP();
+				break;
+
 			default:
 				PX4_ERR("Unknown allocation method");
 				break;
@@ -861,6 +865,10 @@ int ControlAllocator::print_status()
 
 	case AllocationMethod::AUTO:
 		PX4_INFO("Method: Auto");
+		break;
+
+	case AllocationMethod::ERP:
+		PX4_INFO("Method: ERP");
 		break;
 	}
 

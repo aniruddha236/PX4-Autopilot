@@ -10,6 +10,10 @@ public:
 
 	void allocate() override;
 
+	void setEffectivenessMatrix(const matrix::Matrix<float, NUM_AXES, NUM_ACTUATORS> &effectiveness,
+				    const ActuatorVector &actuator_trim, const ActuatorVector &linearization_point, int num_actuators,
+				    bool update_normalization_scale) override;
+
 private:
 	static constexpr int ERP_NUM_AXES = 4;
 
@@ -22,5 +26,7 @@ private:
 	}
 
 	int rankOfEffectiveness(const matrix::Matrix<float, ERP_NUM_AXES, NUM_ACTUATORS> &effectiveness) const;
+
+	void updateControlAllocationMatrixScale();
 
 };

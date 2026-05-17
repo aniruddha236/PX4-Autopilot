@@ -13,6 +13,99 @@ ControlAllocationERP::rankOfEffectiveness(
 }
 
 void
+ControlAllocationERP::setEffectivenessMatrix(
+	const matrix::Matrix<float, NUM_AXES, NUM_ACTUATORS> &effectiveness,
+	const ActuatorVector &actuator_trim,
+	const ActuatorVector &linearization_point,
+	int num_actuators,
+	bool update_normalization_scale)
+{
+	ControlAllocation::setEffectivenessMatrix(
+		effectiveness,
+		actuator_trim,
+		linearization_point,
+		num_actuators,
+		update_normalization_scale);
+
+	if (update_normalization_scale && !_had_actuator_failure) {
+		updateControlAllocationMatrixScale();
+	}
+}
+
+void
+ControlAllocationERP::updateControlAllocationMatrixScale()
+{
+	matrix::Matrix<float, NUM_ACTUATORS, NUM_AXES> mix;
+	matrix::geninv(_effectiveness, mix);
+
+	// Same scale on roll and pitch
+	if (_normalize_rpy) {
+
+		int num_non_zero_roll_torque = 0;
+		int num_non_zero_pitch_torque = 0;
+
+		for (int i = 0; i < _num_actuators; i++) {
+
+			if (fabsf(mix(i, 0)) > 1e-3f) {
+				++num_non_zero_roll_torque;
+			}
+
+			if (fabsf(mix(i, 1)) > 1e-3f) {
+				++num_non_zero_pitch_torque;
+			}
+		}
+
+		float roll_norm_scale = 1.f;
+
+		if (num_non_zero_roll_torque > 0) {
+			roll_norm_scale = sqrtf(mix.col(0).norm_squared() / (num_non_zero_roll_torque / 2.f));
+		}
+
+		float pitch_norm_scale = 1.f;
+
+		if (num_non_zero_pitch_torque > 0) {
+			pitch_norm_scale = sqrtf(mix.col(1).norm_squared() / (num_non_zero_pitch_torque / 2.f));
+		}
+
+		_control_allocation_scale(0) = fmaxf(roll_norm_scale, pitch_norm_scale);
+		_control_allocation_scale(1) = _control_allocation_scale(0);
+
+		// Scale yaw separately
+		_control_allocation_scale(2) = mix.col(2).max();
+
+	} else {
+		_control_allocation_scale(0) = 1.f;
+		_control_allocation_scale(1) = 1.f;
+		_control_allocation_scale(2) = 1.f;
+	}
+
+	// Scale thrust by the sum of the individual thrust axes, and use the scaling for the Z axis if there's no actuators
+	// (for tilted actuators)
+	_control_allocation_scale(THRUST_Z) = 1.f;
+
+	for (int axis_idx = 2; axis_idx >= 0; --axis_idx) {
+		int num_non_zero_thrust = 0;
+		float norm_sum = 0.f;
+
+		for (int i = 0; i < _num_actuators; i++) {
+			float norm = fabsf(mix(i, 3 + axis_idx));
+			norm_sum += norm;
+
+			if (norm > FLT_EPSILON) {
+				++num_non_zero_thrust;
+			}
+		}
+
+		if (num_non_zero_thrust > 0) {
+			_control_allocation_scale(3 + axis_idx) = norm_sum / num_non_zero_thrust;
+
+		} else {
+			_control_allocation_scale(3 + axis_idx) = _control_allocation_scale(THRUST_Z);
+		}
+	}
+}
+
+void
 ControlAllocationERP::allocate()
 {
 	_prev_actuator_sp = _actuator_sp;
@@ -21,10 +114,12 @@ ControlAllocationERP::allocate()
 	ActuatorVector u_delta;
 
 	matrix::Vector<float, ERP_NUM_AXES> gamma_delta_erp;
+	matrix::Vector<float, ERP_NUM_AXES> gamma_trim_erp;
 
 	for (int axis = 0; axis < ERP_NUM_AXES; ++axis) {
 		const int px4_axis = erpAxis(axis);
-		gamma_delta_erp(axis) = _control_sp(px4_axis) - _control_trim(px4_axis);
+		gamma_trim_erp(axis) = _control_allocation_scale(px4_axis) * _control_trim(px4_axis);
+		gamma_delta_erp(axis) = _control_sp(px4_axis) - gamma_trim_erp(axis);
 	}
 
 	float c_erp = 0.0f;
@@ -47,8 +142,9 @@ ControlAllocationERP::allocate()
 			}
 
 			for (int axis_idx = 0; axis_idx < ERP_NUM_AXES; ++axis_idx) {
+				const int px4_axis = erpAxis(axis_idx);
 				effectiveness_active(axis_idx, actuator_idx) =
-					_effectiveness(erpAxis(axis_idx), actuator_idx);
+					_control_allocation_scale(px4_axis) * _effectiveness(px4_axis, actuator_idx);
 			}
 
 			++num_active;
